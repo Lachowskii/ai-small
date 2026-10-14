@@ -1,104 +1,79 @@
 
 import streamlit as st
-from huggingface_hub import hf_hub_download
-from llama_cpp import Llama
-import os
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-st.set_page_config(
-    page_title="Qwen AI Assistant",
-    page_icon="🤖",
-    layout="centered"
-)
-
+st.set_page_config(page_title="Qwen AI", page_icon="🤖")
 st.title("Qwen AI Assistant")
-st.caption("Running a quantized language model locally on the app server.")
 
-MODEL_REPO = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
-MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
+@st.cache_resource(show_spinner="Downloading and loading Qwen...")
+def load_model():
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-@st.cache_resource(show_spinner=False)
-def load_llm():
-    model_path = hf_hub_download(
-        repo_id=MODEL_REPO,
-        filename=MODEL_FILE
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=True
     )
+    model.eval()
+    return tokenizer, model
 
-    return Llama(
-        model_path=model_path,
-        n_ctx=1024,
-        n_threads=2,
-        n_batch=128,
-        verbose=False
-    )
-
-
-if "model_loaded" not in st.session_state:
-    st.session_state.model_loaded = False
-
-if not st.session_state.model_loaded:
-    st.info("The model must be downloaded and initialized before use.")
-
-    if st.button("Load AI Model", type="primary"):
-        try:
-            with st.spinner(
-                "Downloading model if needed and initializing it..."
-            ):
-                llm = load_llm()
-
-            st.session_state.model_loaded = True
-            st.success("Model loaded successfully.")
-            st.rerun()
-
-        except Exception as e:
-            st.error("Failed to load the model.")
-            st.exception(e)
-
+try:
+    tokenizer, model = load_model()
+    st.success("Model loaded.")
+except Exception as e:
+    st.error(f"Model loading failed: {e}")
     st.stop()
-
-
-enable_reasoning = st.checkbox("Enable reasoning-style responses")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-user_input = st.chat_input("Ask Qwen something...")
+prompt = st.chat_input("Ask Qwen...")
 
-if user_input:
+if prompt:
     st.session_state.messages.append(
-        {"role": "user", "content": user_input}
+        {"role": "user", "content": prompt}
     )
 
     with st.chat_message("user"):
-        st.markdown(user_input)
+        st.markdown(prompt)
 
-    system_prompt = (
-        "You are a helpful assistant. Explain your reasoning clearly "
-        "and provide a concise final answer."
-        if enable_reasoning
-        else "You are a concise and helpful assistant. "
-             "Answer directly and accurately."
-    )
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful, concise assistant."
+        }
+    ] + st.session_state.messages
 
     try:
         with st.chat_message("assistant"):
-            with st.spinner("Generating response..."):
-                llm = load_llm()
-
-                response = llm.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        *st.session_state.messages
-                    ],
-                    temperature=0.3,
-                    max_tokens=256
+            with st.spinner("Generating..."):
+                inputs = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt"
                 )
 
-                answer = response["choices"][0]["message"]["content"]
+                with torch.inference_mode():
+                    outputs = model.generate(
+                        inputs,
+                        max_new_tokens=128,
+                        do_sample=False,
+                        pad_token_id=tokenizer.eos_token_id
+                    )
+
+                answer = tokenizer.decode(
+                    outputs[0][inputs.shape[-1]:],
+                    skip_special_tokens=True
+                )
+
                 st.markdown(answer)
 
         st.session_state.messages.append(
